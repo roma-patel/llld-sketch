@@ -66,12 +66,14 @@ def model(args):
             args.batch_size)
     classes, class_to_idx, idx_to_class = utils.get_classes(dataset)
 
+    # todo! change classification to word vectors!
+    # todo! change the number of classes to intersect with quickdraws classes!
     #label_criterion = nn.L1Loss()
     label_criterion = nn.CrossEntropyLoss()
     #label_criterion = nn.MultiLabelMarginLoss()
     reconstr_criterion = nn.MSELoss()
 
-    model = Labeller(width=args.img_size, height=args.img_size, label_dim=len(classes))
+    model = DistributedWordLabeller(width=args.img_size, height=args.img_size, label_dim=len(classes))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
                              weight_decay=1e-5)
     print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
@@ -100,7 +102,12 @@ def model(args):
 
             reconstr_loss = reconstr_criterion(reconstr, img)
             reconstr_loss.backward(retain_graph=True)
+            #print(img)
+            #print(label_dist); print(target_tensor)
+            
             label_loss = label_criterion(label_dist, target_tensor)
+            print(label_loss)
+            #continue
             label_loss.backward()
             optimizer.step()
             train_matrix = update_label_matrix(np.zeros((len(classes), len(classes))), \
@@ -133,6 +140,9 @@ def model(args):
                 f.write(json.dumps(metric_hist))
 
 
+    # todo! don't return from here?
+    #return
+
     matrix = np.zeros((len(classes), len(classes)))
     if args.eval == 'True':
         datapath = args.test_datadir
@@ -159,9 +169,6 @@ def model(args):
         f.write(json.dumps(temp))
 
 
-
-
-
 if __name__ == '__main__':
 
     #run(sketch_idx, img_type, path)
@@ -173,6 +180,7 @@ if __name__ == '__main__':
     log.basicConfig(filename = fname, format='%(asctime)s: %(message)s', \
                     datefmt='%m/%d %I:%M:%S %p', level=log.INFO)
     model(args)
+    #eval(args)
     
 
 

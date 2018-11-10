@@ -144,59 +144,41 @@ class OldLabeller(nn.Module):
         return idxs
 
 
-class AutoEncoder(nn.Module):
-    def __init__(self, img_idx, width, height, attr_dict, label_dim, attr_dim):
-        super(AutoEncoder, self).__init__()
-        self.img_idx = img_idx
-        self.attrs = attr_dict
+class DistributedWordLabeller(nn.Module):
+    def __init__(self, width, height, label_dim):
+        super(Labeller, self).__init__()
         self.encoder = Encoder()
         self.decoder = Decoder()
-        self.flattened_dim = 3528
-        self.label_dim = label_dim
-        self.attr_transform = nn.Linear(self.flattened_dim, attr_dim)
-        self.label_transform = nn.Linear(attr_dim, label_dim)
 
-    def __str__(self):
-        return str((self.img_idx))
+        self.classifier = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(8*21*21, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, label_dim),
+        )
+
+        self.sigmoid = nn.Sigmoid()
+        self.softmax = nn.Softmax(dim=1)
 
     def bottleneck(self, rep):
-        states = self.goal_states()        
-        transform = nn.Linear(self.hidden_dim, len(states))
-        rep = transform(rep)
         rep = nn.functional.softmax(rep, dim=0)
         return rep
 
     def forward(self, input):
-        # encode
-        hidden = self.encoder.forward(input)
-        # classify hidden
-        attr_weights, attr = self.attributes(hidden)
-        #labels = self.labels(hidden)
-        labels = self.labels(attr_weights)
+        encoded_orig = self.encoder.forward(input)
+        reconstr = self.decoder.forward(encoded_orig)
 
-        # decode
-        reconstr = self.decoder.forward(hidden)
+        encoded_reconstr = self.encoder.forward(reconstr)
+        labels = self.classifier(encoded_reconstr.view(encoded_reconstr.size(0), -1))
 
-        return reconstr, attr, labels
-    
+        return reconstr, labels
+
     def ranker(self, rep, k):
         values, indices = rep.sort(dim=0)
-
         return indices[-k:]
-    
-    def attributes(self, rep):
-        rep = rep.view(rep.size(0), -1)
-        attr_weights = self.attr_transform(rep)
-        sigmoid = nn.Sigmoid()
-        attr_dist = sigmoid(attr_weights)
 
-        return attr_weights, attr_dist
-
-    def labels(self, rep):
-        rep = rep.view(rep.size(0), -1)
-        label_weights = self.label_transform(rep)
-        softmax = nn.Softmax(dim=1)
-        label_dist = softmax(label_weights)
-
-        #labels = torch.argmax(label_dist, dim=1)
-        return label_dist
+    def pred_labels(self, label_dist):
+        return torch.argmax(label_dist, dim=1)

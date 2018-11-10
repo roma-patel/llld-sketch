@@ -461,6 +461,56 @@ def test(name, path):
             save_image(reconstr_img, os.getcwd() + '/results/images/' + test_name + '/epoch_' + str(batch_idx) + '.png')
             '''
 
+###### eval taken from main!
+
+import pandas
+import seaborn as sns
+import matplotlib.pyplot as plt
+def eval(args):
+    f = open(os.getcwd() + '/results/files/' + 'sketch_sketchy_nall' + '/matrix.json', 'r')
+    for line in f: temp = json.loads(line)
+    #name = 'sketch_tu_int'
+
+    f = open(os.getcwd() + '/results/files/' + 'sketch_sketchy_nall' + '/idx_to_class.json', 'r')
+    for line in f:
+        idx_to_class = json.loads(line)
+    categories = [idx_to_class[idx] for idx in idx_to_class]
+    items = [[] for item in idx_to_class]
+
+
+    rank = 5
+    name = 'sketch_sketchy_nall'
+    items = utils.add_items(items, name, rank)
+    acc = utils.get_acc_items(items)
+    print(acc)
+    #items = [[] for item in idx_to_class]
+    name = 'photo_sketchy'
+    items = utils.add_items(items, name, rank)
+    acc = utils.get_acc_items(items)
+    print(acc)
+
+    print(items[0])
+    for i in range(len(items)):
+        for j in range(len(items[i])):
+            print(items[i][j])
+        print()
+    '''
+    name = 'sketch_tu_int'
+    items = utils.add_items(items, name)
+    '''
+
+    # plot matrix
+
+    '''
+    print(temp.keys())
+    sim = np.matrix(temp['matrix'])
+    df = pandas.DataFrame(sim)
+    df.columns = categories; df.index = categories
+    ax = sns.heatmap(df, cmap="YlGnBu", annot=True)
+    #ax.set_ylabel(img_type + '_' + metric)
+    plt.show()
+    '''
+
 
 if __name__ == '__main__':
     '''

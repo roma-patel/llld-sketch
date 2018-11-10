@@ -39,6 +39,18 @@ def get_dataset(path, img_size, batch_size):
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 )
     dataset = datasets.ImageFolder(path, transform=img_transform)
+
+    '''
+    counts = {i: 0 for i in range(124)}
+    n_samples = 2
+    print(counts)
+    print(dataset)
+    for item in dataset:
+        c = item[1]
+        if counts[c] >= n_samples: continue
+        counts[c] += 1
+    print(counts)
+    '''
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     return dataset, data_loader
 
@@ -71,6 +83,42 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
 
     return overall_acc, metric_dict
 
+def add_items(items, name, rank):
+    f = open(os.getcwd() + '/results/files/' + name + '/matrix.json', 'r')
+    for line in f:
+        temp = json.loads(line)
+
+    f = open(os.getcwd() + '/results/files/' + name + '/idx_to_class.json', 'r')
+    for line in f:
+        idx_to_class = json.loads(line)
+
+    categories = [idx_to_class[idx] for idx in list(idx_to_class.keys())]
+
+    for i in range(len(categories)):
+        row = temp['matrix'][i]
+        dtype = [('name', 'S10'), ('count', int)]
+        vals = [(categories[i], row[i]) for i in range(len(row))]
+        a = np.array(vals, dtype=dtype)
+        a = np.sort(a, order='count')
+        a = (a[::-1][:rank])
+        s = name.split('_')[0] + '\n' + categories[i] + ' :: ' + ' '.join(str(item[0].strip()) for item in a)
+        items[i].append(s)
+    return items
+
+def get_acc_items(items):
+    accs = []
+    for item in items:
+        vals = item[0].strip().split(' :: ')
+        cat = vals[1]
+        preds = vals[-1].strip().split(') (')
+        preds = [pred.split('\'')[1] for pred in preds]
+        if cat in preds: accs.append(1)
+
+    print(float(sum(accs))/len(items))
+
+
+
+
 def pretty_print(metrics, name):
     cols = ['label_acc', 'attr_acc', 'attr_prec', 'attr_recl']
     s = '-' + '\t'
@@ -86,9 +134,29 @@ def pretty_print(metrics, name):
     return s
 
 
+def interview():
 
+    def search_matrix():
+        a = np.zeros((3, 3)); a[0][2] = 3
+        val = 3
+        start_row, end_row, start_col, end_col = 0, len(a), 0, len(a)
+        while True:
+            mid_row = (start_row+end_row)/2
+            mid_col = (start_col+end_col)/2
+
+            current = a[mid_row][mid_col]
+            if val == current:
+                flag = True
+                break
+            elif val < current:
+                end_row = mid_row
+            else:
+                start_row = mid_row
+
+    search_matrix()
 
 if __name__ == '__main__':
+    interview()
     args = 'sketch_temp sketch /Users/romapatel/github/sketch-attr/'.split()
     #log.basicConfig(filename=os.getcwd() + '/logs/sketch_' + str(sketch_idx) + '.log',level=log.DEBUG)
 
