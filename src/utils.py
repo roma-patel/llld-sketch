@@ -61,6 +61,29 @@ def get_classes(dataset):
 
     return classes, class_to_idx, rev_class
 
+def get_temp_classes(dataset):
+    classes = [str(i) for i in range(69)]
+    class_to_idx = {classes[i]: i for i in range(len(classes))}
+    rev_class = {class_to_idx[key]: key for key in class_to_idx.keys()}
+
+    return classes, class_to_idx, rev_class
+
+def get_word_vectors(wv_path, classes, dim):
+
+    f = open(wv_path, 'r')
+    for line in f:
+        temp = json.loads(line)
+
+    word_vecs = {}
+    for name in classes:
+        word_vecs[name] = temp[name]
+
+    return word_vecs
+
+    print("Temporary random vecs!")
+    word_vecs = {classes[i]: np.random.rand((dim)) for i in range(len(classes))}
+    return word_vecs
+
 def column(matrix, i):
     return [row[i] for row in matrix]
 
@@ -75,10 +98,17 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
         fp = np.sum(confusion_matrix[class_idx]) - tp
         fn = np.sum(column(confusion_matrix, class_idx)) - tp
         tn = np.sum(confusion_matrix) - tp - fp - fn
+
+        if tp == 0:
+            prec, recl, acc = 0.0, 0.0, 0.0
+        else:
+            prec = max(0.0, tp/(tp+fp))
+            recl = max(0,0, tp/(tp+fn))
+            acc = (tp+tn)/(tp+fp+fn+fn)
         metric_dict[idx_to_class[class_idx]] = {
-            'prec': max(0.0, tp/(tp+fp)),
-            'recl': max(0,0, tp/(tp+fn)),
-            'acc': (tp+tn)/(tp+fp+fn+fn)
+            'prec': prec,
+            'recl': recl,
+            'acc': acc
         }
 
     return overall_acc, metric_dict

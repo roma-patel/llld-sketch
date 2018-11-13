@@ -145,8 +145,8 @@ class OldLabeller(nn.Module):
 
 
 class DistributedWordLabeller(nn.Module):
-    def __init__(self, width, height, label_dim):
-        super(Labeller, self).__init__()
+    def __init__(self, width, height, word_dim, label_dim):
+        super(DistributedWordLabeller, self).__init__()
         self.encoder = Encoder()
         self.decoder = Decoder()
 
@@ -157,9 +157,10 @@ class DistributedWordLabeller(nn.Module):
             nn.Dropout(),
             nn.Linear(4096, 4096),
             nn.ReLU(inplace=True),
-            nn.Linear(4096, label_dim),
+            nn.Linear(4096, word_dim),
         )
 
+        self.label_classifier = nn.Linear(word_dim, label_dim)
         self.sigmoid = nn.Sigmoid()
         self.softmax = nn.Softmax(dim=1)
 
@@ -172,13 +173,58 @@ class DistributedWordLabeller(nn.Module):
         reconstr = self.decoder.forward(encoded_orig)
 
         encoded_reconstr = self.encoder.forward(reconstr)
-        labels = self.classifier(encoded_reconstr.view(encoded_reconstr.size(0), -1))
-
-        return reconstr, labels
+        words = self.classifier(encoded_reconstr.view(encoded_reconstr.size(0), -1))
+        labels = self.label_classifier(words)
+        return reconstr, words, labels
 
     def ranker(self, rep, k):
         values, indices = rep.sort(dim=0)
         return indices[-k:]
+
+    def classify_words(self, label_dist):
+        return None
+
+    def pred_labels(self, label_dist):
+        return torch.argmax(label_dist, dim=1)
+
+class DistributedWordLabellerOnly(nn.Module):
+    def __init__(self, width, height, word_dim, label_dim):
+        super(DistributedWordLabellerOnly, self).__init__()
+        self.encoder = Encoder()
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(8*21*21, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, word_dim),
+        )
+
+        self.label_classifier = nn.Linear(word_dim, label_dim)
+        self.sigmoid = nn.Sigmoid()
+        self.softmax = nn.Softmax(dim=1)
+
+    def bottleneck(self, rep):
+        rep = nn.functional.softmax(rep, dim=0)
+        return rep
+
+    # define the number of things
+    def forward(self, input):
+        encoded_orig = self.encoder.forward(input)
+        #reconstr = self.decoder.forward(encoded_orig)
+        #encoded_reconstr = self.encoder.forward(reconstr)
+        words = self.classifier(encoded_orig.view(encoded_orig.size(0), -1))
+        labels = self.label_classifier(words)
+        return words, labels
+
+    def ranker(self, rep, k):
+        values, indices = rep.sort(dim=0)
+        return indices[-k:]
+
+    def classify_words(self, label_dist):
+        return None
 
     def pred_labels(self, label_dist):
         return torch.argmax(label_dist, dim=1)
