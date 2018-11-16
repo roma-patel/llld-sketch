@@ -62,11 +62,27 @@ def get_classes(dataset):
     return classes, class_to_idx, rev_class
 
 def get_temp_classes(dataset):
-    classes = [str(i) for i in range(69)]
-    class_to_idx = {classes[i]: i for i in range(len(classes))}
-    rev_class = {class_to_idx[key]: key for key in class_to_idx.keys()}
+    dirname = os.getcwd() + '/results/files/photo_sketchy/'
 
-    return classes, class_to_idx, rev_class
+    f = open(dirname + 'classes.json', 'r')
+    for line in f: classes = json.loads(line)
+    #classes = [str(i) for i in range(69)]
+
+    f = open(dirname + 'class_to_idx.json', 'r')
+    for line in f: class_to_idx = json.loads(line)
+    #class_to_idx = {classes[i]: i for i in range(len(classes))}
+
+    f = open(dirname + 'idx_to_class.json', 'r')
+    for line in f:
+        temp = json.loads(line)
+
+    idx_to_class = {}
+    for key in temp:
+        idx_to_class[int(key)] = temp[key]
+
+    #idx_to_class = {class_to_idx[key]: key for key in class_to_idx.keys()}
+
+    return classes, class_to_idx, idx_to_class
 
 def get_word_vectors(wv_path, classes, dim):
 
@@ -94,6 +110,7 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
 
     metric_dict = {}
     for class_idx in idx_to_class:
+        print(class_idx)
         tp = confusion_matrix[class_idx][class_idx]
         fp = np.sum(confusion_matrix[class_idx]) - tp
         fn = np.sum(column(confusion_matrix, class_idx)) - tp
@@ -112,6 +129,22 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
         }
 
     return overall_acc, metric_dict
+
+from PIL import Image
+import matplotlib.pyplot as plt
+def open_quickdraw_file(fname):
+    images = np.load(fname)
+    for i in range(5, 10):
+        img = images[i].reshape((28, 28))
+
+        print(len(img))
+        img = np.array(img).astype(np.uint8)
+        img_obj = Image.fromarray(img)
+        img_obj = img_obj.resize((128, 128))
+        img_obj.show()
+        #plt.imshow(img); plt.show()
+
+    return []
 
 def add_items(items, name, rank):
     f = open(os.getcwd() + '/results/files/' + name + '/matrix.json', 'r')
@@ -186,7 +219,8 @@ def interview():
     search_matrix()
 
 if __name__ == '__main__':
-    interview()
+    open_quickdraw_file('/Users/romapatel/Desktop/quickdraw/numpy_bitmap/zebra.npy')
+    #interview()
     args = 'sketch_temp sketch /Users/romapatel/github/sketch-attr/'.split()
     #log.basicConfig(filename=os.getcwd() + '/logs/sketch_' + str(sketch_idx) + '.log',level=log.DEBUG)
 

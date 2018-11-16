@@ -346,6 +346,10 @@ def eval(args):
                          '/matrix.json', 'w+')
         temp = {'matrix': matrix.tolist(), 'metrics': metric_dict, 'avg_acc': avg_acc}
         f.write(json.dumps(temp))
+
+
+# get matrix weights
+
 import operator
 def extract_weights(args):
     args = handle_args(args)
@@ -372,9 +376,32 @@ def extract_weights(args):
                                     word_dim=word_dim, label_dim=label_dim)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
                              weight_decay=1e-5)
-    #print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
-    #word_vecs = utils.get_word_vectors('/data/nlp/glove/glove_300d.json', classes, word_dim)
 
+    # get the matrix and classify the matrix
+
+    f = open(os.getcwd() + '/results/files/' + args.run_name + '/matrix.json', 'r')
+    for line in f: temp = json.loads(line)
+
+    matrix = temp['matrix']
+
+    #print(len(matrix))
+    #print(matrix)
+    #print(matrix[0][0])
+    print(idx_to_class)
+    avg_acc, metric_dict = matrix_to_metrics(matrix, idx_to_class)
+    #print(metric_dict)
+    #print(avg_acc)
+
+
+    print(idx_to_class)
+    for idx in metric_dict:
+        print(idx_to_class[idx])
+        print(metric_dict[idx])
+
+    return
+
+
+    # get the weights from the linear layer, this forms the matrix, classify this matrix,
     matrix = np.zeros((len(classes), len(classes)))
     identity = torch.eye(300)
 
