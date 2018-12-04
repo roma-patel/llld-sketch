@@ -14,6 +14,11 @@ from src import modules, utils
 from src.modules import *
 from src.utils import *
 import scipy.stats as stats
+from pretrained_cnns.alexnet import alexnet
+from pretrained_cnns.vgg import vgg19
+from pretrained_cnns.vgg import vgg11
+
+from pretrained_cnns.resnet import resnet101
 
 def handle_args(args):
     parser = argparse.ArgumentParser(description='')
@@ -40,20 +45,21 @@ def handle_args(args):
     parser.add_argument('--img_size', '-img_size', type=int, default=256,
             help='')
     parser.add_argument('--datadir', '-datadir', type=str, \
-                        default= '/Users/romapatel/github/sketch-attr/data/temp/animals/natural/',
+                        default= '/Users/romapatel/github/llld-sketch/data/temp/animals/natural/',
             help='')
     parser.add_argument('--eval', '-eval', type=str, default='True',
             help='')
     parser.add_argument('--test_datadir', '-test_datadir', type=str, \
-                        default= '/Users/romapatel/github/sketch-attr/data/temp/animals/natural/',
+                        default= '/Users/romapatel/github/llld-sketch/data/temp/animals/natural/',
             help='')
-
-
-
+    parser.add_argument('--fin_run', '-fin_run', type=str, default='only-reconstr',
+            help='')
     return parser.parse_args(args)
 
-def model_encoder(args):
-    args = handle_args(args)
+
+
+# take photo + text, predict photo + text
+def model_1(args):
     if os.path.isdir(os.getcwd() + '/results/images/' + args.run_name) is False:
         os.mkdir(os.getcwd() + '/results/images/' + args.run_name)
 
@@ -64,26 +70,30 @@ def model_encoder(args):
         os.mkdir(os.getcwd() + '/results/files/' + args.run_name)
 
     datapath = args.datadir
+    #args.batch_size = 2
+    args.img_size = 224
     dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
             args.batch_size)
     classes, class_to_idx, idx_to_class = utils.get_classes(dataset)
     word_dim = 300
-    label_dim = len(classes)
-    # todo! change the number of classes to intersect with quickdraws classes!
-    #label_criterion = nn.L1Loss()
     label_criterion = nn.CrossEntropyLoss()
-    #label_criterion = nn.MultiLabelMarginLoss()
-    reconstr_criterion = nn.MSELoss()
+    reconstr_criterion = nn.L1Loss()
+    #reconstr_criterion = nn.MSELoss()
 
-    model = DistributedWordLabellerOnly(width=args.img_size, height=args.img_size, \
-                                    word_dim=word_dim, label_dim=label_dim)
+    model = BimodalDAEImage(300, 2048, n_classes=len(classes))
+    cnn = resnet101(pretrained=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
                              weight_decay=1e-5)
     print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
 
-    word_vecs = utils.get_word_vectors('/data/nlp/glove/glove_300d.json', classes, word_dim)
+
+    #### change temp
+    #word_vecs = utils.get_wvecs_json(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
+    word_vecs = utils.get_word_vectors(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
+
 
     loss_hist, metric_hist = {}, {}
+    softmax = nn.Softmax(dim=1)
     for epoch in range(args.epochs):
         print('Epoch %r' %epoch)
         log.info('Epoch %r' %epoch)
@@ -92,81 +102,58 @@ def model_encoder(args):
             batch_acc, batch_loss = [], {'reconstr': [], 'classification': []}
             target_idxs = target_tensor.data.numpy().tolist()
             target_names = [idx_to_class[idx] for idx in target_idxs]
-
-            target_dist_reps = torch.tensor([word_vecs[name] for name in target_names], \
-                                            dtype=torch.float32)
             target_labels = torch.tensor([[1 if i == idx else 0 for i in \
                     range(len(classes))] for idx in target_idxs], \
                     dtype=torch.long)
 
+            # previously target dist reps
+            target_textual = torch.tensor([word_vecs[name] for name in target_names], \
+                                            dtype=torch.float32)
+            #print('Text', target_textual.size())
+
+            #img_rep = img[0].reshape(1, 3, args.img_size, args.img_size)
+            #print(img_rep.size())
+            #rep = vgg.forward(img_rep)
+            #print(rep.size())
+            target_visual = torch.tensor(
+                [cnn.forward(
+                    img[idx].reshape(1, 3, args.img_size, args.img_size)).data.numpy() for idx in range(len(target_idxs))], dtype=torch.float32
+            )
+
+            #print('Visual', target_visual.size())
+
             n_samples = len(target_idxs)
             optimizer.zero_grad()
 
-            word_dist, label_dist = model.forward(img)
-            labels = model.pred_labels(label_dist)
+            img_reconstr, text_reconstr, hidden = model.forward(target_visual, \
+                                                              target_textual)
+            textual_loss = reconstr_criterion(text_reconstr, target_textual)
+            textual_loss.backward(retain_graph=True)
+            visual_loss = reconstr_criterion(img_reconstr, target_visual)
+            visual_loss.backward(retain_graph=True)
 
-            word_loss=  reconstr_criterion(word_dist, target_dist_reps)
-            word_loss.backward(retain_graph=True)
+            #print('Textual reconstr', text_reconstr.size())
 
-            label_loss = label_criterion(label_dist, target_tensor)
-            label_loss.backward()
+            #print('Visual reconstr', img_reconstr.size())
+            #print('Hidden', hidden.size())
+            preds = softmax(hidden)
+
+            pred_loss = label_criterion(preds, target_tensor)
+            pred_loss.backward()
+
             optimizer.step()
 
-            train_matrix = update_label_matrix(np.zeros((len(classes), len(classes))), \
-                                               labels, target_idxs)
-            avg_acc, metric_dict = matrix_to_metrics(train_matrix, idx_to_class)
-            batch_acc.append(avg_acc)
-            batch_loss['classification'].append(label_loss.data.numpy().tolist())
-            loss_hist[epoch][batch_idx] = batch_loss
-            metric_hist[epoch][batch_idx] = metric_dict
-            log.info('Classification loss: (%r)' \
-                     %(label_loss.data.numpy().tolist()))
-            log.info('Batch accuracy: (%r)' %(avg_acc))
             if epoch%10 == 0:
                 state = {'epoch': epoch + 1, 'state_dict': \
                         model.state_dict(), 'optimizer': optimizer.state_dict()}
                 torch.save(state, os.getcwd() + "/model_states/" + args.run_name)
 
-                # save weights
-                identity = torch.eye(len(classes))
-                # save loss and metrics
-                f = open(os.getcwd() + '/results/history/' + args.run_name + \
-                         '/loss_hist.json', 'w+')
-                f.write(json.dumps(loss_hist))
-                f = open(os.getcwd() + '/results/history/' + args.run_name + \
-                         '/metric_hist.json', 'w+')
-                f.write(json.dumps(metric_hist))
 
+    return
 
-
-    matrix = np.zeros((len(classes), len(classes)))
-    if args.eval == 'True':
-        datapath = args.test_datadir
-        dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-        checkpoint = torch.load(os.getcwd() + '/model_states/' + args.run_name)
-        model.load_state_dict(checkpoint['state_dict'])
-
-        with torch.no_grad():
-            for batch_idx, (img, target_tensor) in enumerate(data_loader):
-                target_idxs = target_tensor.data.numpy().tolist()
-                target_names = [idx_to_class[idx] for idx in target_idxs]
-                target_labels = torch.tensor([[1 if i == idx else 0 for i in \
-                    range(len(classes))] for idx in target_idxs], \
-                    dtype=torch.float32)
-
-                word_dist, label_dist = model.forward(img)
-                labels = model.pred_labels(label_dist)
-                matrix = update_label_matrix(matrix, labels, target_idxs)
-        avg_acc, metric_dict = matrix_to_metrics(train_matrix, idx_to_class)
-        f = open(os.getcwd() + '/results/files/' + args.run_name + \
-                         '/matrix.json', 'w+')
-        temp = {'matrix': matrix.tolist(), 'metrics': metric_dict, 'avg_acc': avg_acc}
-        f.write(json.dumps(temp))
-
-
-def model(args):
-    args = handle_args(args)
+import re
+# take photo + text, predict sketch + text
+def model_2(args):
     if os.path.isdir(os.getcwd() + '/results/images/' + args.run_name) is False:
         os.mkdir(os.getcwd() + '/results/images/' + args.run_name)
 
@@ -177,27 +164,136 @@ def model(args):
         os.mkdir(os.getcwd() + '/results/files/' + args.run_name)
 
     datapath = args.datadir
+    #########
+
+
+
+    #change sketch path, batch size
+    sketch_datapath = re.sub('natural', 'sketch', datapath)
+    #sketch_datapath = re.sub
+    #args.batch_size = 2
+    args.img_size = 224
+    photo_path = '/data/nlp/sketchy_splits/photo/train/'
+
+    dataset, data_loader = utils.get_photo_sketch_dataset(photo_path, args.img_size, \
+            args.batch_size, sketch_datapath)
+
+
+    classes, class_to_idx, idx_to_class = utils.get_classes(dataset)
+    word_dim = 300
+    label_criterion = nn.CrossEntropyLoss()
+    reconstr_criterion = nn.L1Loss()
+    #reconstr_criterion = nn.MSELoss()
+
+    model = BimodalDAEImage(300, 2048, n_classes=len(classes))
+    cnn = resnet101(pretrained=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
+                             weight_decay=1e-5)
+    print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
+    print('\nDataloader: %r' % (len(data_loader)))
+
+
+    #### change temp
+    #word_vecs = utils.get_wvecs_json(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
+    word_vecs = utils.get_word_vectors(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
+
+
+    loss_hist, metric_hist = {}, {}
+    softmax = nn.Softmax(dim=1)
+    for epoch in range(args.epochs):
+        print('Epoch %r' %epoch)
+        log.info('Epoch %r' %epoch)
+        loss_hist[epoch], metric_hist[epoch] = {}, {}
+        #for batch_idx, (img, target_tensor) in enumerate(data_loader):
+        for batch_idx, (img, target_tensor, sketch_img) in data_loader:
+
+            batch_acc, batch_loss = [], {'reconstr': [], 'classification': []}
+            target_idxs = target_tensor.data.numpy().tolist()
+            target_names = [idx_to_class[idx] for idx in target_idxs]
+            target_labels = torch.tensor([[1 if i == idx else 0 for i in \
+                    range(len(classes))] for idx in target_idxs], \
+                    dtype=torch.long)
+
+            # previously target dist reps
+            target_textual = torch.tensor([word_vecs[name] for name in target_names], \
+                                            dtype=torch.float32)
+
+            target_visual = torch.tensor(
+                [cnn.forward(
+                    sketch_img[idx].reshape(1, 3, args.img_size, args.img_size)).data.numpy() for idx in range(len(target_idxs))], dtype=torch.float32
+            )
+
+            #print('Visual', target_visual.size())
+
+            n_samples = len(target_idxs)
+            optimizer.zero_grad()
+
+            img_reconstr, text_reconstr, hidden = model.forward(target_visual, \
+                                                              target_textual)
+            textual_loss = reconstr_criterion(text_reconstr, target_textual)
+            textual_loss.backward(retain_graph=True)
+            visual_loss = reconstr_criterion(img_reconstr, target_visual)
+            visual_loss.backward(retain_graph=True)
+
+            #print('Textual reconstr', text_reconstr.size())
+
+            #print('Visual reconstr', img_reconstr.size())
+            #print('Hidden', hidden.size())
+            preds = softmax(hidden)
+
+            pred_loss = label_criterion(preds, target_tensor)
+            pred_loss.backward()
+
+            optimizer.step()
+
+            print(textual_loss); print(visual_loss); print(pred_loss); print()
+            if epoch%10 == 0:
+                state = {'epoch': epoch + 1, 'state_dict': \
+                        model.state_dict(), 'optimizer': optimizer.state_dict()}
+                torch.save(state, os.getcwd() + "/model_states/" + args.run_name)
+
+
+    return
+
+# take photo + text, predict attr + text
+def model_3(args):
+    if os.path.isdir(os.getcwd() + '/results/images/' + args.run_name) is False:
+        os.mkdir(os.getcwd() + '/results/images/' + args.run_name)
+
+    if os.path.isdir(os.getcwd() + '/results/history/' + args.run_name) is False:
+        os.mkdir(os.getcwd() + '/results/history/' + args.run_name)
+
+    if os.path.isdir(os.getcwd() + '/results/files/' + args.run_name) is False:
+        os.mkdir(os.getcwd() + '/results/files/' + args.run_name)
+
+    datapath = args.datadir
+    #args.batch_size = 2
+    args.img_size = 224
+    photo_path = '/data/nlp/sketchy_splits/photo/train/'
+
     dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
             args.batch_size)
     classes, class_to_idx, idx_to_class = utils.get_classes(dataset)
     word_dim = 300
-    label_dim = len(classes)
-    # todo! change the number of classes to intersect with quickdraws classes!
-    #label_criterion = nn.L1Loss()
-    label_criterion = nn.CrossEntropyLoss()
-    #label_criterion = nn.MultiLabelMarginLoss()
-    reconstr_criterion = nn.MSELoss()
+    attr_dict, n_attrs = get_attrs(class_to_idx)
 
-    model = DistributedWordLabeller(width=args.img_size, height=args.img_size, \
-                                    word_dim=word_dim, label_dim=label_dim)
+    label_criterion = nn.CrossEntropyLoss()
+    reconstr_criterion = nn.L1Loss()
+    #reconstr_criterion = nn.MSELoss()
+
+    model = BimodalDAEAttr(300, 2048, n_attrs, n_classes=len(classes))
+    cnn = resnet101(pretrained=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
                              weight_decay=1e-5)
     print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
 
-    #word_vecs = {i: [0, 0, 0] for i in range(300)}
-    word_vecs = utils.get_word_vectors('/data/nlp/glove/glove_300d.json', classes, word_dim)
+
+    #### change temp
+    #word_vecs = utils.get_wvecs_json(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
+    word_vecs = utils.get_word_vectors(os.getcwd() + '/data/files/wvecs.json', classes, word_dim)
 
     loss_hist, metric_hist = {}, {}
+    softmax = nn.Softmax(dim=1)
     for epoch in range(args.epochs):
         print('Epoch %r' %epoch)
         log.info('Epoch %r' %epoch)
@@ -206,323 +302,66 @@ def model(args):
             batch_acc, batch_loss = [], {'reconstr': [], 'classification': []}
             target_idxs = target_tensor.data.numpy().tolist()
             target_names = [idx_to_class[idx] for idx in target_idxs]
-
-            target_dist_reps = torch.tensor([word_vecs[name] for name in target_names], \
-                                            dtype=torch.float32)
             target_labels = torch.tensor([[1 if i == idx else 0 for i in \
                     range(len(classes))] for idx in target_idxs], \
                     dtype=torch.long)
+            target_attrs = torch.tensor([attr_dict[idx_to_class[idx]] for idx in \
+                    target_idxs], dtype=torch.float32)
+            # previously target dist reps
+            target_textual = torch.tensor([word_vecs[name] for name in target_names], \
+                                            dtype=torch.float32)
+            #print('Text', target_textual.size())
+
+            #img_rep = img[0].reshape(1, 3, args.img_size, args.img_size)
+            #print(img_rep.size())
+            #rep = vgg.forward(img_rep)
+            #print(rep.size())
+            target_visual = torch.tensor(
+                [cnn.forward(
+                    img[idx].reshape(1, 3, args.img_size, args.img_size)).data.numpy() for idx in range(len(target_idxs))], dtype=torch.float32
+            )
+
+            #print('Visual', target_visual.size())
 
             n_samples = len(target_idxs)
             optimizer.zero_grad()
 
-            reconstr, word_dist, label_dist = model.forward(img)
-            labels = model.pred_labels(label_dist)
+            img_reconstr, text_reconstr, hidden = model.forward(target_visual, \
+                                                              target_textual)
+            textual_loss = reconstr_criterion(text_reconstr, target_textual)
+            textual_loss.backward(retain_graph=True)
+            visual_loss = reconstr_criterion(img_reconstr, target_attrs)
+            visual_loss.backward(retain_graph=True)
 
-            reconstr_loss = reconstr_criterion(reconstr, img)
-            reconstr_loss.backward(retain_graph=True)
+            #print('Textual reconstr', text_reconstr.size())
 
-            word_loss=  reconstr_criterion(word_dist, target_dist_reps)
-            word_loss.backward(retain_graph=True)
+            #print('Visual reconstr', img_reconstr.size())
+            #print('Hidden', hidden.size())
+            preds = softmax(hidden)
 
-            label_loss = label_criterion(label_dist, target_tensor)
-            label_loss.backward()
+            pred_loss = label_criterion(preds, target_tensor)
+            pred_loss.backward()
+            #print(pred_loss)
+
             optimizer.step()
 
-            train_matrix = update_label_matrix(np.zeros((len(classes), len(classes))), \
-                                               labels, target_idxs)
-            avg_acc, metric_dict = matrix_to_metrics(train_matrix, idx_to_class)
-            batch_acc.append(avg_acc)
-            batch_loss['reconstr'].append(reconstr_loss.data.numpy().tolist())
-            batch_loss['classification'].append(label_loss.data.numpy().tolist())
-            loss_hist[epoch][batch_idx] = batch_loss
-            metric_hist[epoch][batch_idx] = metric_dict
-            log.info('Reconstr loss, classification loss: (%r, %r)' \
-                     %(reconstr_loss.data.numpy().tolist(), \
-                       label_loss.data.numpy().tolist()))
-            log.info('Batch accuracy: (%r)' %(avg_acc))
             if epoch%10 == 0:
                 state = {'epoch': epoch + 1, 'state_dict': \
                         model.state_dict(), 'optimizer': optimizer.state_dict()}
                 torch.save(state, os.getcwd() + "/model_states/" + args.run_name)
-                save_image(reconstr, os.getcwd() + '/results/images/' \
-                           + args.run_name + '/epoch_' + str(epoch) + '.png')
-
-                # save weights
-                identity = torch.eye(len(classes))
-                # save loss and metrics
-                f = open(os.getcwd() + '/results/history/' + args.run_name + \
-                         '/loss_hist.json', 'w+')
-                f.write(json.dumps(loss_hist))
-                f = open(os.getcwd() + '/results/history/' + args.run_name + \
-                         '/metric_hist.json', 'w+')
-                f.write(json.dumps(metric_hist))
-
-
-
-    matrix = np.zeros((len(classes), len(classes)))
-    if args.eval == 'True':
-        datapath = args.test_datadir
-        dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-        checkpoint = torch.load(os.getcwd() + '/model_states/' + args.run_name)
-        model.load_state_dict(checkpoint['state_dict'])
-
-        with torch.no_grad():
-            for batch_idx, (img, target_tensor) in enumerate(data_loader):
-                target_idxs = target_tensor.data.numpy().tolist()
-                target_names = [idx_to_class[idx] for idx in target_idxs]
-                target_labels = torch.tensor([[1 if i == idx else 0 for i in \
-                    range(len(classes))] for idx in target_idxs], \
-                    dtype=torch.float32)
-
-                reconstr, word_dist, label_dist = model.forward(img)
-                labels = model.pred_labels(label_dist)
-                matrix = update_label_matrix(matrix, labels, target_idxs)
-        avg_acc, metric_dict = matrix_to_metrics(train_matrix, idx_to_class)
-        f = open(os.getcwd() + '/results/files/' + args.run_name + \
-                         '/matrix.json', 'w+')
-        temp = {'matrix': matrix.tolist(), 'metrics': metric_dict, 'avg_acc': avg_acc}
-        f.write(json.dumps(temp))
-
-def eval(args):
-    args = handle_args(args)
-    if os.path.isdir(os.getcwd() + '/results/images/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/images/' + args.run_name)
-
-    if os.path.isdir(os.getcwd() + '/results/history/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/history/' + args.run_name)
-
-    if os.path.isdir(os.getcwd() + '/results/files/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/files/' + args.run_name)
-
-
-    datapath = args.datadir
-    dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-    classes, class_to_idx, idx_to_class = utils.get_classes(dataset)
-    word_dim = 300
-    label_dim = len(classes)
-    # todo! change the number of classes to intersect with quickdraws classes!
-    #label_criterion = nn.L1Loss()
-    label_criterion = nn.CrossEntropyLoss()
-    #label_criterion = nn.MultiLabelMarginLoss()
-    reconstr_criterion = nn.MSELoss()
-
-    model = DistributedWordLabeller(width=args.img_size, height=args.img_size, \
-                                    word_dim=word_dim, label_dim=label_dim)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
-                             weight_decay=1e-5)
-    print('\nNum classes: %r, num images: %r' % (len(classes), len(dataset)))
-
-    #word_vecs = {i: [0, 0, 0] for i in range(300)}
-    word_vecs = utils.get_word_vectors('/data/nlp/glove/glove_300d.json', classes, word_dim)
-
-    matrix = np.zeros((len(classes), len(classes)))
-    if args.eval == 'True':
-        datapath = args.test_datadir
-        dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-        checkpoint = torch.load(os.getcwd() + '/model_states/' + args.run_name)
-        model.load_state_dict(checkpoint['state_dict'])
-
-        with torch.no_grad():
-            for batch_idx, (img, target_tensor) in enumerate(data_loader):
-                target_idxs = target_tensor.data.numpy().tolist()
-                target_names = [idx_to_class[idx] for idx in target_idxs]
-                print(target_names)
-                target_labels = torch.tensor([[1 if i == idx else 0 for i in \
-                    range(len(classes))] for idx in target_idxs], \
-                    dtype=torch.float32)
-
-                reconstr, word_dist, label_dist = model.forward(img)
-                labels = model.pred_labels(label_dist)
-                matrix = update_label_matrix(matrix, labels, target_idxs)
-        avg_acc, metric_dict = matrix_to_metrics(train_matrix, idx_to_class)
-
-        print(avg_acc); print(metric_dict)
-        return
-        f = open(os.getcwd() + '/results/files/' + args.run_name + \
-                         '/matrix.json', 'w+')
-        temp = {'matrix': matrix.tolist(), 'metrics': metric_dict, 'avg_acc': avg_acc}
-        f.write(json.dumps(temp))
-
-
-# get matrix weights
-
-import operator
-def extract_weights(args):
-    args = handle_args(args)
-    if os.path.isdir(os.getcwd() + '/results/images/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/images/' + args.run_name)
-
-    if os.path.isdir(os.getcwd() + '/results/history/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/history/' + args.run_name)
-
-    if os.path.isdir(os.getcwd() + '/results/files/' + args.run_name) is False:
-        os.mkdir(os.getcwd() + '/results/files/' + args.run_name)
-
-
-    datapath = args.datadir
-    dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-    classes, class_to_idx, idx_to_class = utils.get_temp_classes(dataset)
-    word_dim = 300
-    label_dim = len(classes)
-
-
-    print('Model: ', args.run_name)
-    model = DistributedWordLabeller(width=args.img_size, height=args.img_size, \
-                                    word_dim=word_dim, label_dim=label_dim)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,
-                             weight_decay=1e-5)
-
-    # get the matrix and classify the matrix
-
-    f = open(os.getcwd() + '/results/files/' + args.run_name + '/matrix.json', 'r')
-    for line in f: temp = json.loads(line)
-
-    matrix = temp['matrix']
-
-    #print(len(matrix))
-    #print(matrix)
-    #print(matrix[0][0])
-    print(idx_to_class)
-    avg_acc, metric_dict = matrix_to_metrics(matrix, idx_to_class)
-    #print(metric_dict)
-    #print(avg_acc)
-
-
-    print(idx_to_class)
-    for idx in metric_dict:
-        print(idx_to_class[idx])
-        print(metric_dict[idx])
-
-    return
-
-
-    # get the weights from the linear layer, this forms the matrix, classify this matrix,
-    matrix = np.zeros((len(classes), len(classes)))
-    identity = torch.eye(300)
-
-    m = model.label_classifier(identity)
-    m = torch.transpose(m, 0, 1)    #print(m)
-    f = open(os.getcwd() + '/results/files/sketch_sketchy/' + 'idx_to_class.json', 'r')
-    for line in f: idx_to_class = json.loads(line)
-
-    rep_dict = {}
-    for i in range(len(m)):
-        class_name = idx_to_class[str(i)]
-        rep_dict[class_name] = m[i].data.numpy()
-
-    f = open(os.getcwd() + '/data/files/wvecs.json', 'r')
-    for line in f: wvecs = json.loads(line)
-
-    for name in wvecs:
-        wvecs[name] = np.array(wvecs[name])
-    classes = list(rep_dict.keys())
-    sims = []
-
-    def get_sim(class_1, class_2, rep_dict):
-        dot_product = rep_dict[class_1].reshape(-1, 1) * rep_dict[class_2].reshape(-1, 1)
-        #print(dot_product)
-        norm_1 = (np.linalg.norm(rep_dict[class_1].reshape(-1, 1)))
-        norm_2 = (np.linalg.norm(rep_dict[class_2].reshape(-1, 1)))
-        cos_sim = np.sum(dot_product)/(norm_1*norm_2)
-        return cos_sim
-
-    for (class_1, class_2) in itertools.product(classes, classes):
-        pair = class_1 + '#' + class_2
-        cos_sim = get_sim(class_1, class_2, rep_dict)
-        word_sim = get_sim(class_1, class_2, wvecs)
-
-        #print(cos_sim)
-        sims.append((pair, round(cos_sim, 3), round(word_sim, 3)))
-
-    sorted_sims = sorted(sims, key=operator.itemgetter(1), reverse=True)
-
-    for item in sorted_sims:
-        if item[1] > 0.9: continue
-        print(item)
-
-    print(len(sorted_sims))
-
-
-    def get_corrs(pair_tuples):
-        temp = 'sailboat,piano,sheep,pistol,snail,harp,cat,rocket,cannon,rabbit'
-        temp = temp.split(',')
-        f = open(os.getcwd() + '/data/files/sem-vis-sketchy.tsv', 'r')
-        lines = [line.strip().split('\t') for line in f.readlines()]
-
-        pairs = {item[0]:item[1] for item in pair_tuples}
-        vals = []
-        for line in lines:
-            class_1, class_2, sem, vis = line[0], line[1], float(line[2]), float(line[3])
-            if class_1 in temp or class_2 in temp: continue
-            pair = class_1 + '#' + class_2
-            if pair in pairs:
-                vals.append((pair, sem, vis, pairs[pair]))
-
-
-        for val in vals:
-            print(val)
-
-        cos_list = [item[-1] for item in vals]
-        sem_list = [item[1] for item in vals]
-        vis_list = [item[2] for item in vals]
-
-        #print(vals)
-        spearman_sem = stats.spearmanr(cos_list, sem_list)
-        spearman_vis = stats.spearmanr(cos_list, vis_list)
-
-        pearson_sem = stats.pearsonr(cos_list, sem_list)
-        pearson_vis = stats.pearsonr(cos_list, vis_list)
-
-        print('Semantic: Pearson: %f, Spearman: %f' %(round(pearson_sem[0], 3), \
-                                                      round(spearman_sem[0], 3)))
-        print('Visual: Pearson: %f, Spearman: %f' %(round(pearson_vis[0], 3), \
-                                                      round(spearman_vis[0], 3)))
-
-    print('\n\nImage!')
-    get_corrs([(item[0], item[1]) for item in sims])
-    #print('Word!')
-
-    #get_corrs([(item[0], item[2]) for item in sims])
-
-
-
 
 
     return
 
-    if args.eval == 'True':
-        datapath = args.test_datadir
-        dataset, data_loader = utils.get_dataset(datapath, args.img_size, \
-            args.batch_size)
-        checkpoint = torch.load(os.getcwd() + '/model_states/' + args.run_name)
-        model.load_state_dict(checkpoint['state_dict'])
-
-        with torch.no_grad():
-            for batch_idx, (img, target_tensor) in enumerate(data_loader):
-                target_idxs = target_tensor.data.numpy().tolist()
-                target_names = [idx_to_class[idx] for idx in target_idxs]
-                print(target_names)
-                target_labels = torch.tensor([[1 if i == idx else 0 for i in \
-                    range(len(classes))] for idx in target_idxs], \
-                    dtype=torch.float32)
-
-                reconstr, word_dist, label_dist = model.forward(img)
-                labels = model.pred_labels(label_dist)
-                matrix = update_label_matrix(matrix, labels, target_idxs)
-        avg_acc, metric_dict = matrix_to_metrics(matrix, idx_to_class)
-
-    print(avg_acc); print(metric_dict)
+# unimodal, reconstr photo
+def model_4(args):
     return
 
-
+# unimodal, reconstr sketch
+def model_5(args):
+    return
 if __name__ == '__main__':
 
-    #run(sketch_idx, img_type, path)
     args = sys.argv[1:]
     handled_args = handle_args(args)
     if os.path.isdir(os.getcwd() + '/logs/') is False:
@@ -530,13 +369,21 @@ if __name__ == '__main__':
     fname = os.getcwd() + '/logs/' + handled_args.run_name + '.log'
     log.basicConfig(filename = fname, format='%(asctime)s: %(message)s', \
                     datefmt='%m/%d %I:%M:%S %p', level=log.INFO)
-    #model(args)
-    extract_weights(args)
-    #model_encoder(args)
-    
+
+    #handled_args.fin_run = 'sketch-reconstr'
 
 
-    
+    if handled_args.fin_run == 'photo-reconstr':
+        model_1(handled_args)
+    elif handled_args.fin_run == 'sketch-reconstr':
+        model_2(handled_args)
+    elif handled_args.fin_run == 'attr-reconstr':
+        model_3(handled_args)
+    elif handled_args.fin_run == 'unimodal-photo':
+        model_4(handled_args)
+    elif handled_args.fin_run == 'unimodal-sketch':
+        model_5(handled_args)
+
 
 
 

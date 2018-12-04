@@ -12,6 +12,8 @@ import itertools, json, os, sys, shutil
 from torchvision.utils import save_image
 import logging as log
 import itertools
+from pretrained_cnns.alexnet import alexnet
+from pretrained_cnns.vgg import vgg19
 
 def to_img(x, img_size):
     x = 0.5 * (x + 1)
@@ -33,11 +35,15 @@ def update_attr_matrix(matrix, labels, target_idxs):
     return matrix
 
 def get_dataset(path, img_size, batch_size):
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
     img_transform = transforms.Compose(
             [transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-                )
+            normalize]
+            #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    )
     dataset = datasets.ImageFolder(path, transform=img_transform)
 
     '''
@@ -52,6 +58,66 @@ def get_dataset(path, img_size, batch_size):
     print(counts)
     '''
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return dataset, data_loader
+
+from PIL import Image as Im
+def get_photo_sketch_dataset(path, img_size, batch_size, sketch_path):
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
+    img_transform = transforms.Compose(
+            [transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            normalize]
+            #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    )
+    dataset = datasets.ImageFolder(path, transform=img_transform)
+    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+
+    classes, class_to_idx, rev_class = get_classes(dataset)
+    photos = {class_name: [item.split('.')[0] for item in os.listdir(path + '/' + class_name)] for class_name \
+              in classes}
+    sketches = {class_name: [item.split('.')[0] for item in os.listdir(sketch_path + '/' + class_name)] for class_name \
+              in classes}
+
+
+    # create tuples = (batch_idx, img1, target_tensor, img_2)
+    # first create a list of (img_1, target, img_2) and shuffle
+    # then split by batch and create the first tuple
+    pairs, data_loader = [], []
+    for class_name in photos:
+        class_idx = class_to_idx[class_name]
+        for photo_idx in photos[class_name]:
+            if os.path.isfile(path + '/' + class_name + '/' + photo_idx + '.jpg') is False: continue
+            photo = Im.open(path + '/' + class_name + '/' + photo_idx + '.jpg')
+            photo_tr = img_transform(photo)
+            #### change this!
+            #sketch_idxs = [item for item in sketches[class_name]]
+            sketch_idxs = [item for item in sketches[class_name] \
+                           if item.split('-')[0] == photo_idx]
+            for sketch_idx in sketch_idxs:
+                sketch = Im.open(sketch_path + '/' + class_name + '/' + sketch_idx + '.png')
+                sketch_tr = img_transform(sketch)
+                pairs.append((torch.tensor(photo_tr), class_idx, torch.tensor(sketch_tr)))
+
+            #break
+
+    np.random.shuffle(pairs)
+    batches = [pairs[i:i+batch_size] for i in range(0, len(pairs), batch_size)]
+
+    for batch_idx in range(len(batches)):
+        batch = batches[batch_idx]
+        targets, photos, sketches = [], [], []
+        for item in batch:
+            targets.append(item[1])
+            photos.append(item[0].data.numpy())
+            sketches.append(item[2].data.numpy())
+
+        data_loader.append((batch_idx, (torch.tensor(photos), \
+                                               torch.tensor(targets),
+                                               torch.tensor(sketches))))
+
     return dataset, data_loader
 
 def get_classes(dataset):
@@ -100,6 +166,25 @@ def get_word_vectors(wv_path, classes, dim):
     word_vecs = {classes[i]: np.random.rand((dim)) for i in range(len(classes))}
     return word_vecs
 
+def get_wvecs_json(wv_path, classes, dim):
+
+    print("Temporary random vecs!")
+    word_vecs = {classes[i]: np.random.rand((dim)) for i in range(len(classes))}
+    return word_vecs
+
+
+    f = open(wv_path, 'r')
+    for line in f:
+        temp = json.loads(line)
+
+    word_vecs = {}
+    for name in classes:
+        if name in word_vecs:
+            word_vecs[name] = temp[name]
+
+    return word_vecs
+
+
 def column(matrix, i):
     return [row[i] for row in matrix]
 
@@ -110,7 +195,7 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
 
     metric_dict = {}
     for class_idx in idx_to_class:
-        print(class_idx)
+        #print(class_idx)
         tp = confusion_matrix[class_idx][class_idx]
         fp = np.sum(confusion_matrix[class_idx]) - tp
         fn = np.sum(column(confusion_matrix, class_idx)) - tp
@@ -130,6 +215,10 @@ def matrix_to_metrics(confusion_matrix, idx_to_class):
 
     return overall_acc, metric_dict
 
+import scipy.stats as stats
+def get_spearman(cos_list, sem_list):
+    return spearmanr(cos_list, sem_list)[0]
+
 from PIL import Image
 import matplotlib.pyplot as plt
 def open_quickdraw_file(fname):
@@ -140,11 +229,73 @@ def open_quickdraw_file(fname):
         print(len(img))
         img = np.array(img).astype(np.uint8)
         img_obj = Image.fromarray(img)
-        img_obj = img_obj.resize((128, 128))
-        img_obj.show()
-        #plt.imshow(img); plt.show()
+        #img_obj = img_obj.resize((128, 128))
+        #img_obj.show()
 
     return []
+import PIL.ImageOps
+def convert_quickdraw_data(dirpath):
+    if os.path.isdir(dirpath + '/images') is False:
+        os.mkdir(dirpath+ '/images')
+
+    fnames = os.listdir(dirpath + '/numpy_bitmap')
+    print(fnames)
+    for fname in fnames:
+        #open_quickdraw_file(fname)
+        category = fname.split('.')[0]
+        if os.path.isdir(dirpath + '/images/' + category + '/') is False:
+            os.mkdir(dirpath + '/images/' + category)
+        print('Category', fname)
+        images = np.load(dirpath + '/numpy_bitmap/' + fname)
+        #return
+        for i in range(len(images)):
+            img = images[i].reshape((28, 28))
+            img = np.array(img).astype(np.uint8)
+            img_obj = Image.fromarray(img)
+            img_obj = PIL.ImageOps.invert(img_obj)
+            #img_obj.show()
+            img_obj.save(dirpath + '/images/' + category + '/' + str(i) + '.jpg')
+
+import shutil
+def add_sketchy_quickdraw():
+    # save intersecting categories
+    f = open('/home/rpatel59/nlp/llld-sketch/data/files/sketchy_quickdraw_classes.json', 'r')
+    for line in f: temp = json.loads(line)
+    categories = temp['test'] + temp['train']
+    # copy 5 sketchy into test, remaining into train
+    sketchy = '/data/nlp/sketchy/figs/256x256/sketch/tx_000000000000/'
+    quickdraw = '/data/nlp/quickdraw/images/'
+
+    train_dst = '/data/nlp/gen_sketches/train/'; test_dst = '/data/nlp/gen_sketches/test/'
+
+    # train items
+
+    counts = {}
+    for cat in categories:
+        if os.path.isdir('/data/nlp/gen_sketches/train/' + cat) is False:
+            os.mkdir('/data/nlp/gen_sketches/train/' + cat)
+        if os.path.isdir('/data/nlp/gen_sketches/test/' + cat) is False:
+            os.mkdir('/data/nlp/gen_sketches/test/' + cat)
+
+        counts[cat] = 0
+        fnames = os.listdir(sketchy + cat + '/')
+        for fname in fnames[:5]:
+            src = sketchy + cat + '/' + fname
+            shutil.copy(src, test_dst + cat + '/')
+        for fname in fnames[5:]:
+            counts[cat] += 1
+            src = sketchy + cat + '/' + fname
+            shutil.copy(src, train_dst + cat + '/')
+
+        fnames = os.listdir(quickdraw + cat + '/')
+        for fname in fnames:
+            counts[cat] += 1
+            src = quickdraw + cat + '/' + fname
+            shutil.copy(src, train_dst + cat + '/')
+
+
+    f = open('/home/rpatel59/nlp/llld-sketch/data/files/counts-gen.json', 'w+')
+    f.write(json.dumps(counts))
 
 def add_items(items, name, rank):
     f = open(os.getcwd() + '/results/files/' + name + '/matrix.json', 'r')
@@ -196,30 +347,79 @@ def pretty_print(metrics, name):
 
     return s
 
+def get_attrs(class_to_idx):
+    attr_dict = {}
+    f = open(os.getcwd() + '/data/files/attr.json', 'r')
+    for line in f:
+        attrs = json.loads(line)
 
-def interview():
+    f = open(os.getcwd() + '/data/files/attrs.tsv', 'r')
+    attr_names = [line.strip() for line in f.readlines()]
 
-    def search_matrix():
-        a = np.zeros((3, 3)); a[0][2] = 3
-        val = 3
-        start_row, end_row, start_col, end_col = 0, len(a), 0, len(a)
-        while True:
-            mid_row = (start_row+end_row)/2
-            mid_col = (start_col+end_col)/2
+    existing_attrs = []
 
-            current = a[mid_row][mid_col]
-            if val == current:
-                flag = True
-                break
-            elif val < current:
-                end_row = mid_row
-            else:
-                start_row = mid_row
+    for cat in class_to_idx.keys():
+        existing_attrs.extend([attr_names[i] for i in range(len(attr_names)) if attrs[cat][i] > 0])
 
-    search_matrix()
+    existing_attrs = [attr for attr in existing_attrs if '-' not in attr]
+    existing_attrs = sorted(list(set(existing_attrs)))
+
+    print(existing_attrs)
+    for attr in attrs:
+        if attr in class_to_idx.keys():
+            temp = attrs[attr]
+            attr_dict[attr] = [temp[i] for i in range(len(temp)) if attr_names[i] in existing_attrs]
+            
+    return attr_dict, len(existing_attrs)
+
+def move_data():
+    dirpath = '/data/nlp/sketchy_splits/'
+    folders = ['sketch/', 'sketch_3/', 'photo/']
+
+    f = open(os.getcwd() + '/data/files/sketchy_classes.json', 'r')
+    for line in f: classes = json.loads(line)
+
+    train, test = classes['train'], classes['test']
+
+    for folder in folders:
+        for class_name in test:
+            src_dir = dirpath + folder + 'test/' + class_name + '/'
+            dest_dir = dirpath + folder + 'train/' + class_name + '/'
+
+            fnames = os.listdir(src_dir)
+            test_files = fnames[:5]
+            train_files = fnames[5:]
+            for file in train_files:
+                print(file)
+                print(src_dir); print(dest_dir); print('\n')
+                shutil.move(src_dir + file, dest_dir)
+        
+def get_img_rep(model, image):
+    print('Image!')
+    print(image)
+    rep = model.forward(image)
+    print(rep)
+    print('\n\n\n')
+    return rep
 
 if __name__ == '__main__':
-    open_quickdraw_file('/Users/romapatel/Desktop/quickdraw/numpy_bitmap/zebra.npy')
+    #convert_quickdraw_data('/data/nlp/quickdraw/')
+
+    img_size, batch_size = 256, 64
+    datapath = '/Users/romapatel/github/llld-sketch/data/temp/animals/natural/'
+    dataset, data_loader = get_dataset(datapath, img_size, \
+            batch_size)
+
+    model = vgg19(pretrained=True)
+    #model = alexnet(pretrained=True)
+
+    for batch_idx, (img, target_tensor) in enumerate(data_loader):
+        get_img_rep(model, img)
+    #add_sketchy_quickdraw()
+    #move_data()
+
+    #convert_quickdraw_data('/Users/romapatel/Desktop/quickdraw/')
+    #open_quickdraw_file('/Users/romapatel/Desktop/quickdraw/numpy_bitmap/zebra.npy')
     #interview()
     args = 'sketch_temp sketch /Users/romapatel/github/sketch-attr/'.split()
     #log.basicConfig(filename=os.getcwd() + '/logs/sketch_' + str(sketch_idx) + '.log',level=log.DEBUG)
